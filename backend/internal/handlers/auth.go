@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"marco-polo/internal/models"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthHandler struct {
@@ -27,24 +31,55 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+
 	if req.Username == "" || req.Email == "" || req.Password == "" {
 		writeJSON(w, http.StatusBadRequest, models.Response{Success: false, Error: "username, email and password are required"})
 		return
 	}
 
-	hash := hashPassword(req.Password)
-
-	result, err := h.db.Exec("INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-		req.Username, req.Email, hash)
+	hash, err := hashPassword(req.Password)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, models.Response{Success: false, Error: "username or email already exists"})
+		h.logger.Error("failed to hash password", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
 		return
 	}
 
-	id, _ := result.LastInsertId()
+	result, err := h.db.Exec(
+		"INSERT INTO users (username, email, password_hash, phone) VALUES (?, ?, ?, ?)",
+		req.Username, req.Email, hash, strings.TrimSpace(req.Phone),
+	)
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			writeJSON(w, http.StatusConflict, models.Response{Success: false, Error: "username or email already exists"})
+			return
+		}
 
-	token := generateToken()
-	_, _ = h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id)
+		h.logger.Error("failed to register user", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		h.logger.Error("failed to get inserted user id", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
+
+	token, err := generateToken()
+	if err != nil {
+		h.logger.Error("failed to generate session token", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
+
+	if _, err := h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
+		h.logger.Error("failed to persist session", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, models.Response{
 		Success: true,
@@ -64,24 +99,45 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash := hashPassword(req.Password)
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, models.Response{Success: false, Error: "email and password are required"})
+		return
+	}
 
 	var id int64
 	var username string
-	err := h.db.QueryRow("SELECT id, username FROM users WHERE email = ? AND password_hash = ?",
-		req.Email, hash).Scan(&id, &username)
+	var passwordHash string
+	err := h.db.QueryRow("SELECT id, username, password_hash FROM users WHERE email = ?",
+		req.Email).Scan(&id, &username, &passwordHash)
 
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusUnauthorized, models.Response{Success: false, Error: "invalid credentials"})
 		return
 	}
 	if err != nil {
+		h.logger.Error("failed to query user for login", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
 		return
 	}
 
-	token := generateToken()
-	_, _ = h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id)
+	if !verifyPassword(req.Password, passwordHash) {
+		writeJSON(w, http.StatusUnauthorized, models.Response{Success: false, Error: "invalid credentials"})
+		return
+	}
+
+	token, err := generateToken()
+	if err != nil {
+		h.logger.Error("failed to generate session token", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
+
+	if _, err := h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
+		h.logger.Error("failed to persist session", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, models.Response{
 		Success: true,
@@ -94,15 +150,28 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// hashPassword is a placeholder — should use bcrypt in production
-func hashPassword(password string) string {
-	return "$placeholder$" + password
+func hashPassword(password string) (string, error) {
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return string(hashed), nil
 }
 
-func generateToken() string {
+func verifyPassword(password, hash string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+func generateToken() (string, error) {
 	b := make([]byte, 32)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func isUniqueConstraintError(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func writeJSON(w http.ResponseWriter, status int, resp interface{}) {

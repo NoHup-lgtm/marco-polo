@@ -6,6 +6,7 @@ type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
 	Email        string    `json:"email"`
+	Phone        string    `json:"phone,omitempty"`
 	PasswordHash string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 }
@@ -20,6 +21,7 @@ type Item struct {
 	Status      string     `json:"status"`    // "active", "claimed", "returned"
 	Location    string     `json:"location,omitempty"`
 	ImageURL    string     `json:"image_url,omitempty"`
+	FoundAt     *time.Time `json:"found_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
@@ -43,6 +45,7 @@ type RegisterRequest struct {
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Phone    string `json:"phone,omitempty"`
 }
 
 type LoginRequest struct {
@@ -57,6 +60,20 @@ type CreateItemRequest struct {
 	Location    string `json:"location,omitempty"`
 	CategoryID  *int64 `json:"category_id,omitempty"`
 	ImageURL    string `json:"image_url,omitempty"`
+	FoundAt     string `json:"found_at,omitempty"`
+}
+
+type CreateClaimRequest struct {
+	Message string `json:"message,omitempty"`
+}
+
+type UpdateClaimStatusRequest struct {
+	Status string `json:"status"`
+}
+
+type RegisterItemReturnRequest struct {
+	CollectedBy   string `json:"collected_by"`
+	RecipientName string `json:"recipient_name,omitempty"`
 }
 
 type Response struct {
