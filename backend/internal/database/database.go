@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/lib/pq"
 )
 
 type DB struct {
@@ -14,102 +15,31 @@ type DB struct {
 }
 
 func New(logger *slog.Logger) (*DB, error) {
-	path := os.Getenv("DB_PATH")
-	if path == "" {
-		path = "./marco_polo.db"
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if databaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite3: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-
-	logger.Info("database initialized", "path", path)
+	logger.Info("database initialized", "dialect", "postgres")
 
 	if err := initSchema(db); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	return &DB{db}, nil
+	return &DB{DB: db}, nil
 }
 
 func initSchema(db *sql.DB) error {
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS users (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT NOT NULL UNIQUE,
-			email TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
-			phone TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS categories (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL UNIQUE,
-			slug TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE TABLE IF NOT EXISTS items (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			user_id INTEGER NOT NULL,
-			category_id INTEGER,
-			title TEXT NOT NULL,
-			description TEXT,
-			item_type TEXT NOT NULL CHECK(item_type IN ('lost', 'found')),
-			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'claimed', 'returned')),
-			location TEXT,
-			image_url TEXT,
-			found_at DATE,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (user_id) REFERENCES users(id),
-			FOREIGN KEY (category_id) REFERENCES categories(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS claims (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			item_id INTEGER NOT NULL,
-			requester_id INTEGER NOT NULL,
-			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
-			message TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (item_id) REFERENCES items(id),
-			FOREIGN KEY (requester_id) REFERENCES users(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			token TEXT NOT NULL UNIQUE,
-			user_id INTEGER NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (user_id) REFERENCES users(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS item_returns (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			item_id INTEGER NOT NULL UNIQUE,
-			collected_by TEXT NOT NULL,
-			recipient_name TEXT,
-			delivered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			delivered_by_user_id INTEGER,
-			FOREIGN KEY (item_id) REFERENCES items(id),
-			FOREIGN KEY (delivered_by_user_id) REFERENCES users(id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_type ON items(item_type)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_status ON items(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_category ON items(category_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_claims_item ON claims(item_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_claims_requester ON claims(requester_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`,
-	}
-
+	migrations := postgresMigrations()
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {
 			return fmt.Errorf("exec migration: %w\nquery: %s", err, m)
@@ -131,36 +61,92 @@ func initSchema(db *sql.DB) error {
 	return nil
 }
 
+func postgresMigrations() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id BIGSERIAL PRIMARY KEY,
+			username TEXT NOT NULL UNIQUE,
+			email TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			phone TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS categories (
+			id BIGSERIAL PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			slug TEXT NOT NULL UNIQUE
+		)`,
+		`CREATE TABLE IF NOT EXISTS items (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL,
+			category_id BIGINT,
+			title TEXT NOT NULL,
+			description TEXT,
+			item_type TEXT NOT NULL CHECK(item_type IN ('lost', 'found')),
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'claimed', 'returned')),
+			location TEXT,
+			image_url TEXT,
+			found_at DATE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_id) REFERENCES users(id),
+			FOREIGN KEY (category_id) REFERENCES categories(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS claims (
+			id BIGSERIAL PRIMARY KEY,
+			item_id BIGINT NOT NULL,
+			requester_id BIGINT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
+			message TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (item_id) REFERENCES items(id),
+			FOREIGN KEY (requester_id) REFERENCES users(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id BIGSERIAL PRIMARY KEY,
+			token TEXT NOT NULL UNIQUE,
+			user_id BIGINT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS item_returns (
+			id BIGSERIAL PRIMARY KEY,
+			item_id BIGINT NOT NULL UNIQUE,
+			collected_by TEXT NOT NULL,
+			recipient_name TEXT,
+			delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			delivered_by_user_id BIGINT,
+			FOREIGN KEY (item_id) REFERENCES items(id),
+			FOREIGN KEY (delivered_by_user_id) REFERENCES users(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_items_type ON items(item_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_items_status ON items(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_items_category ON items(category_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_claims_item ON claims(item_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_claims_requester ON claims(requester_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_claims_status ON claims(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)`,
+	}
+}
+
 func ensureColumnExists(db *sql.DB, table, column, definition string) error {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	var exists bool
+	err := db.QueryRow(
+		`SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_schema = 'public'
+			AND table_name = $1
+			AND column_name = $2
+		)`,
+		table,
+		column,
+	).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("read table info for %s: %w", table, err)
 	}
-	defer rows.Close()
-
-	exists := false
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			columnType string
-			notNull    int
-			defaultVal sql.NullString
-			primaryKey int
-		)
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
-			return fmt.Errorf("scan table info for %s: %w", table, err)
-		}
-		if name == column {
-			exists = true
-			break
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate table info for %s: %w", table, err)
-	}
-
 	if exists {
 		return nil
 	}
@@ -187,7 +173,7 @@ func seedDefaultCategories(db *sql.DB) error {
 
 	for _, category := range defaultCategories {
 		if _, err := db.Exec(
-			"INSERT OR IGNORE INTO categories (name, slug) VALUES (?, ?)",
+			"INSERT INTO categories (name, slug) VALUES ($1, $2) ON CONFLICT (slug) DO NOTHING",
 			category.name,
 			category.slug,
 		); err != nil {

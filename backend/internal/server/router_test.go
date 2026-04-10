@@ -2,12 +2,13 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -359,8 +360,11 @@ func setupRouter(t *testing.T) http.Handler {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	t.Setenv("DB_PATH", dbPath)
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://marco_polo:marco_polo@localhost:5432/marco_polo?sslmode=disable"
+	}
+	t.Setenv("DATABASE_URL", databaseURL)
 
 	db, err := database.New(logger)
 	if err != nil {
@@ -368,7 +372,39 @@ func setupRouter(t *testing.T) http.Handler {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	resetTestDatabase(t, db.DB)
+
 	return NewRouter(db.DB, logger)
+}
+
+func resetTestDatabase(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	if _, err := db.Exec("TRUNCATE TABLE item_returns, claims, items, sessions, users, categories RESTART IDENTITY CASCADE"); err != nil {
+		t.Fatalf("failed to truncate test tables: %v", err)
+	}
+
+	defaultCategories := []struct {
+		name string
+		slug string
+	}{
+		{name: "Documentos", slug: "documentos"},
+		{name: "Eletronicos", slug: "eletronicos"},
+		{name: "Roupas", slug: "roupas"},
+		{name: "Acessorios", slug: "acessorios"},
+		{name: "Material Escolar", slug: "material-escolar"},
+		{name: "Outros", slug: "outros"},
+	}
+
+	for _, category := range defaultCategories {
+		if _, err := db.Exec(
+			"INSERT INTO categories (name, slug) VALUES ($1, $2) ON CONFLICT (slug) DO NOTHING",
+			category.name,
+			category.slug,
+		); err != nil {
+			t.Fatalf("failed to seed category %s: %v", category.slug, err)
+		}
+	}
 }
 
 func registerUser(t *testing.T, router http.Handler, suffix string) string {
