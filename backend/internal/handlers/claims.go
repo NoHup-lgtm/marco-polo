@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"marco-polo/internal/models"
 )
@@ -31,7 +32,7 @@ func (h *ItemHandler) CreateClaim(w http.ResponseWriter, r *http.Request) {
 
 	var ownerID int64
 	var itemStatus string
-	err = h.db.QueryRow("SELECT user_id, status FROM items WHERE id = ?", itemID).Scan(&ownerID, &itemStatus)
+	err = dbQueryRow(h.db, "SELECT user_id, status FROM items WHERE id = ?", itemID).Scan(&ownerID, &itemStatus)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, models.Response{Success: false, Error: "item not found"})
 		return
@@ -52,7 +53,8 @@ func (h *ItemHandler) CreateClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var existingClaimID int64
-	err = h.db.QueryRow(
+	err = dbQueryRow(
+		h.db,
 		"SELECT id FROM claims WHERE item_id = ? AND requester_id = ? AND status = 'pending'",
 		itemID,
 		requesterID,
@@ -67,7 +69,8 @@ func (h *ItemHandler) CreateClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.db.Exec(
+	claimID, err := insertAndReturnID(
+		h.db,
 		"INSERT INTO claims (item_id, requester_id, status, message, created_at) VALUES (?, ?, 'pending', ?, CURRENT_TIMESTAMP)",
 		itemID,
 		requesterID,
@@ -75,13 +78,6 @@ func (h *ItemHandler) CreateClaim(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		h.logger.Error("failed to insert claim", "item_id", itemID, "requester_id", requesterID, "error", err)
-		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to create claim"})
-		return
-	}
-
-	claimID, err := result.LastInsertId()
-	if err != nil {
-		h.logger.Error("failed to read claim id", "item_id", itemID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to create claim"})
 		return
 	}
@@ -111,7 +107,7 @@ func (h *ItemHandler) ListItemClaims(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var ownerID int64
-	err = h.db.QueryRow("SELECT user_id FROM items WHERE id = ?", itemID).Scan(&ownerID)
+	err = dbQueryRow(h.db, "SELECT user_id FROM items WHERE id = ?", itemID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, models.Response{Success: false, Error: "item not found"})
 		return
@@ -127,7 +123,8 @@ func (h *ItemHandler) ListItemClaims(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query(
+	rows, err := dbQuery(
+		h.db,
 		`SELECT c.id, c.item_id, c.requester_id, c.status, c.message, c.created_at, u.username
 		 FROM claims c
 		 JOIN users u ON u.id = c.requester_id
@@ -157,7 +154,7 @@ func (h *ItemHandler) ListItemClaims(w http.ResponseWriter, r *http.Request) {
 		var (
 			claim     claimView
 			message   sql.NullString
-			createdAt string
+			createdAt time.Time
 		)
 		if err := rows.Scan(
 			&claim.ID,
@@ -175,7 +172,7 @@ func (h *ItemHandler) ListItemClaims(w http.ResponseWriter, r *http.Request) {
 		if message.Valid {
 			claim.Message = message.String
 		}
-		claim.CreatedAt = createdAt
+		claim.CreatedAt = createdAt.Format(time.RFC3339)
 		claims = append(claims, claim)
 	}
 
@@ -195,7 +192,8 @@ func (h *ItemHandler) ListMyClaims(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query(
+	rows, err := dbQuery(
+		h.db,
 		`SELECT c.id, c.item_id, c.status, c.message, c.created_at, i.title
 		 FROM claims c
 		 JOIN items i ON i.id = c.item_id
@@ -224,7 +222,7 @@ func (h *ItemHandler) ListMyClaims(w http.ResponseWriter, r *http.Request) {
 		var (
 			claim     myClaimView
 			message   sql.NullString
-			createdAt string
+			createdAt time.Time
 		)
 		if err := rows.Scan(&claim.ID, &claim.ItemID, &claim.Status, &message, &createdAt, &claim.ItemTitle); err != nil {
 			h.logger.Error("failed to scan user claim row", "requester_id", requesterID, "error", err)
@@ -234,7 +232,7 @@ func (h *ItemHandler) ListMyClaims(w http.ResponseWriter, r *http.Request) {
 		if message.Valid {
 			claim.Message = message.String
 		}
-		claim.CreatedAt = createdAt
+		claim.CreatedAt = createdAt.Format(time.RFC3339)
 		claims = append(claims, claim)
 	}
 
@@ -286,7 +284,8 @@ func (h *ItemHandler) UpdateClaimStatus(w http.ResponseWriter, r *http.Request) 
 		itemOwnerID int64
 		itemStatus  string
 	)
-	err = tx.QueryRow(
+	err = txQueryRow(
+		tx,
 		`SELECT c.item_id, c.status, i.user_id, i.status
 		 FROM claims c
 		 JOIN items i ON i.id = c.item_id
@@ -317,19 +316,19 @@ func (h *ItemHandler) UpdateClaimStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if _, err := tx.Exec("UPDATE claims SET status = ? WHERE id = ?", req.Status, claimID); err != nil {
+	if _, err := txExec(tx, "UPDATE claims SET status = ? WHERE id = ?", req.Status, claimID); err != nil {
 		h.logger.Error("failed to update claim status", "claim_id", claimID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to update claim"})
 		return
 	}
 
 	if req.Status == "accepted" {
-		if _, err := tx.Exec("UPDATE items SET status = 'claimed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", itemID); err != nil {
+		if _, err := txExec(tx, "UPDATE items SET status = 'claimed', updated_at = CURRENT_TIMESTAMP WHERE id = ?", itemID); err != nil {
 			h.logger.Error("failed to update item status to claimed", "item_id", itemID, "error", err)
 			writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to update claim"})
 			return
 		}
-		if _, err := tx.Exec("UPDATE claims SET status = 'rejected' WHERE item_id = ? AND id <> ? AND status = 'pending'", itemID, claimID); err != nil {
+		if _, err := txExec(tx, "UPDATE claims SET status = 'rejected' WHERE item_id = ? AND id <> ? AND status = 'pending'", itemID, claimID); err != nil {
 			h.logger.Error("failed to reject competing claims", "item_id", itemID, "error", err)
 			writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to update claim"})
 			return
@@ -389,7 +388,7 @@ func (h *ItemHandler) RegisterReturn(w http.ResponseWriter, r *http.Request) {
 
 	var ownerID int64
 	var itemStatus string
-	err = tx.QueryRow("SELECT user_id, status FROM items WHERE id = ?", itemID).Scan(&ownerID, &itemStatus)
+	err = txQueryRow(tx, "SELECT user_id, status FROM items WHERE id = ?", itemID).Scan(&ownerID, &itemStatus)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, models.Response{Success: false, Error: "item not found"})
 		return
@@ -409,7 +408,8 @@ func (h *ItemHandler) RegisterReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := tx.Exec(
+	if _, err := txExec(
+		tx,
 		"INSERT INTO item_returns (item_id, collected_by, recipient_name, delivered_by_user_id, delivered_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
 		itemID,
 		req.CollectedBy,
@@ -425,7 +425,7 @@ func (h *ItemHandler) RegisterReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := tx.Exec("UPDATE items SET status = 'returned', updated_at = CURRENT_TIMESTAMP WHERE id = ?", itemID); err != nil {
+	if _, err := txExec(tx, "UPDATE items SET status = 'returned', updated_at = CURRENT_TIMESTAMP WHERE id = ?", itemID); err != nil {
 		h.logger.Error("failed to update item to returned", "item_id", itemID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to register return"})
 		return

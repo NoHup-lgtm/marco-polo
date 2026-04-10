@@ -38,7 +38,7 @@ func (m *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
 		}
 
 		var userID int64
-		err := m.db.QueryRow("SELECT user_id FROM sessions WHERE token = ?", token).Scan(&userID)
+		err := dbQueryRow(m.db, "SELECT user_id FROM sessions WHERE token = ?", token).Scan(&userID)
 		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusUnauthorized, models.Response{Success: false, Error: "invalid session token"})
 			return

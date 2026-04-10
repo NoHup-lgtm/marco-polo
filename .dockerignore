@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+docs
+backend/marco_polo.db
+backend/.env
+**/.DS_Store
+**/tmp
+**/dist
+**/node_modules

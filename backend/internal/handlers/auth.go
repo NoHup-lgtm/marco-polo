@@ -46,7 +46,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.db.Exec(
+	id, err := insertAndReturnID(h.db,
 		"INSERT INTO users (username, email, password_hash, phone) VALUES (?, ?, ?, ?)",
 		req.Username, req.Email, hash, strings.TrimSpace(req.Phone),
 	)
@@ -61,13 +61,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		h.logger.Error("failed to get inserted user id", "error", err)
-		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
-		return
-	}
-
 	token, err := generateToken()
 	if err != nil {
 		h.logger.Error("failed to generate session token", "error", err)
@@ -75,7 +68,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
+	if _, err := dbExec(h.db, "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
 		h.logger.Error("failed to persist session", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
 		return
@@ -108,7 +101,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	var username string
 	var passwordHash string
-	err := h.db.QueryRow("SELECT id, username, password_hash FROM users WHERE email = ?",
+	err := dbQueryRow(h.db, "SELECT id, username, password_hash FROM users WHERE email = ?",
 		req.Email).Scan(&id, &username, &passwordHash)
 
 	if err == sql.ErrNoRows {
@@ -133,7 +126,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.db.Exec("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
+	if _, err := dbExec(h.db, "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)", token, id); err != nil {
 		h.logger.Error("failed to persist session", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "internal server error"})
 		return
@@ -171,7 +164,9 @@ func generateToken() (string, error) {
 }
 
 func isUniqueConstraintError(err error) bool {
-	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "duplicate key value violates unique constraint")
 }
 
 func writeJSON(w http.ResponseWriter, status int, resp interface{}) {

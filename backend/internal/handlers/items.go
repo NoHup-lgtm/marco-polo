@@ -34,7 +34,7 @@ func (h *ItemHandler) List(w http.ResponseWriter, r *http.Request) {
 		status = "active"
 	}
 
-	query := "SELECT id, user_id, category_id, title, description, item_type, status, location, image_url, found_at, created_at, updated_at FROM items WHERE 1=1"
+	query := "SELECT id, user_id, category_id, title, description, item_type, status, location, image_url, CAST(found_at AS TEXT) AS found_at, created_at, updated_at FROM items WHERE 1=1"
 	args := []interface{}{}
 
 	if itemType != "" {
@@ -82,7 +82,7 @@ func (h *ItemHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	query += " ORDER BY created_at DESC"
 
-	rows, err := h.db.Query(query, args...)
+	rows, err := dbQuery(h.db, query, args...)
 	if err != nil {
 		h.logger.Error("failed to query items list", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to fetch items"})
@@ -129,8 +129,8 @@ func (h *ItemHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 
 	var item models.Item
 	var foundAt sql.NullString
-	err = h.db.QueryRow(
-		"SELECT id, user_id, category_id, title, description, item_type, status, location, image_url, found_at, created_at, updated_at FROM items WHERE id = ?",
+	err = dbQueryRow(h.db,
+		"SELECT id, user_id, category_id, title, description, item_type, status, location, image_url, CAST(found_at AS TEXT) AS found_at, created_at, updated_at FROM items WHERE id = ?",
 		id,
 	).Scan(
 		&item.ID, &item.UserID, &item.CategoryID, &item.Title, &item.Description,
@@ -190,19 +190,12 @@ func (h *ItemHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.db.Exec(
+	id, err := insertAndReturnID(h.db,
 		"INSERT INTO items (user_id, category_id, title, description, item_type, location, image_url, found_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		userID, req.CategoryID, req.Title, req.Description, req.ItemType, req.Location, req.ImageURL, foundAt,
 	)
 	if err != nil {
 		h.logger.Error("failed to create item", "error", err)
-		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to create item"})
-		return
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		h.logger.Error("failed to read inserted item id", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to create item"})
 		return
 	}
@@ -256,7 +249,7 @@ func (h *ItemHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.db.Exec(
+	_, err = dbExec(h.db,
 		"UPDATE items SET title = ?, description = ?, location = ?, category_id = ?, found_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
 		req.Title, req.Description, req.Location, req.CategoryID, foundAt, id,
 	)
@@ -298,7 +291,7 @@ func (h *ItemHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = h.db.Exec("DELETE FROM items WHERE id = ?", id)
+	_, err = dbExec(h.db, "DELETE FROM items WHERE id = ?", id)
 	if err != nil {
 		h.logger.Error("failed to delete item", "item_id", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to delete item"})
@@ -310,7 +303,7 @@ func (h *ItemHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *ItemHandler) findItemOwner(itemID int64) (int64, bool, error) {
 	var ownerID int64
-	err := h.db.QueryRow("SELECT user_id FROM items WHERE id = ?", itemID).Scan(&ownerID)
+	err := dbQueryRow(h.db, "SELECT user_id FROM items WHERE id = ?", itemID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
 		return 0, false, nil
 	}

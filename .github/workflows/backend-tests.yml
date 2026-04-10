@@ -13,6 +13,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: marco_polo
+          POSTGRES_USER: marco_polo
+          POSTGRES_PASSWORD: marco_polo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U marco_polo -d marco_polo"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://marco_polo:marco_polo@localhost:5432/marco_polo?sslmode=disable
     defaults:
       run:
         working-directory: backend

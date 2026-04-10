@@ -18,7 +18,7 @@ func NewCategoryHandler(db *sql.DB, logger *slog.Logger) *CategoryHandler {
 }
 
 func (h *CategoryHandler) List(w http.ResponseWriter, _ *http.Request) {
-	rows, err := h.db.Query("SELECT id, name, slug FROM categories ORDER BY name ASC")
+	rows, err := dbQuery(h.db, "SELECT id, name, slug FROM categories ORDER BY name ASC")
 	if err != nil {
 		h.logger.Error("failed to query categories", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.Response{Success: false, Error: "failed to fetch categories"})
